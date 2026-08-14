@@ -984,6 +984,36 @@ test_expect_success 'fetching deepen beyond merged branch' '
 	)
 '
 
+# Relative deepen measures the client's current depth by walking the
+# ancestry of the wants with no cutoff (3ef68ff40e).  After a --depth=1
+# clone the want *is* the shallow, so a bounded walk never needs older
+# history.  Drop an ancestor that --deepen=1 does not need to send;
+# upload-pack must still succeed.  An unbounded measurement walk dies
+# in parse_commit() on the missing object.
+test_expect_failure 'fetch --deepen does not walk beyond the new boundary' '
+	(
+		GIT_TEST_COMMIT_GRAPH=0 &&
+		export GIT_TEST_COMMIT_GRAPH &&
+		test_create_repo deepen-unbounded &&
+		cd deepen-unbounded &&
+		git config gc.auto 0 &&
+		git config core.commitGraph false &&
+		test_commit --no-tag ancient &&
+		ancient=$(git rev-parse HEAD) &&
+		test_commit parent &&
+		test_commit tip &&
+		git clone --depth 1 "file://$(pwd)/." client &&
+		rm -f .git/objects/$(test_oid_to_path "$ancient") &&
+		git -C client fetch --deepen=1 &&
+		git -C client log --pretty=tformat:%s origin/main >actual &&
+		cat >expect <<-\EOF &&
+		tip
+		parent
+		EOF
+		test_cmp expect actual
+	)
+'
+
 test_negotiation_algorithm_default () {
 	test_when_finished rm -rf clientv0 clientv2 &&
 	rm -rf server client &&
