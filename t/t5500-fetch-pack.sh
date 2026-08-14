@@ -990,7 +990,7 @@ test_expect_success 'fetching deepen beyond merged branch' '
 # history.  Drop an ancestor that --deepen=1 does not need to send;
 # upload-pack must still succeed.  An unbounded measurement walk dies
 # in parse_commit() on the missing object.
-test_expect_failure 'fetch --deepen does not walk beyond the new boundary' '
+test_expect_success 'fetch --deepen does not walk beyond the new boundary' '
 	(
 		GIT_TEST_COMMIT_GRAPH=0 &&
 		export GIT_TEST_COMMIT_GRAPH &&

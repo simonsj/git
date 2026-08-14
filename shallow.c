@@ -11,6 +11,7 @@
 #include "pkt-line.h"
 #include "refs.h"
 #include "oid-array.h"
+#include "oidset.h"
 #include "path.h"
 #include "diff.h"
 #include "revision.h"
@@ -129,23 +130,15 @@ static void free_depth_in_slab(int **ptr)
 	FREE_AND_NULL(*ptr);
 }
 /*
- * This is a common internal function that can either return a list of
- * shallow commits or calculate the current maximum depth of a shallow
- * repository, depending on the input parameters.
- *
- * Depth calculation is triggered by passing the `shallows` parameter.
- * In this case, the computed depth is stored in `max_cur_depth` (if it is
- * provided), and the function returns NULL.
- *
- * Otherwise, `max_cur_depth` remains unchanged and the function returns
- * a list of shallow commits.
+ * Walk from `heads` down to `depth` and return the resulting shallow
+ * boundary.  Used for absolute deepen and for the second half of
+ * relative deepen (after the client's current depth has been added).
  */
 static struct commit_list *get_shallows_or_depth(struct object_array *heads,
-				struct object_array *shallows, int *max_cur_depth,
 				int depth, int shallow_flag, int not_shallow_flag)
 {
 	size_t i = 0;
-	int cur_depth = 0, cur_depth_shallow = 0;
+	int cur_depth = 0;
 	struct commit_list *result = NULL;
 	struct object_array stack = OBJECT_ARRAY_INIT;
 	struct commit *commit = NULL;
@@ -179,30 +172,16 @@ static struct commit_list *get_shallows_or_depth(struct object_array *heads,
 		}
 		parse_commit_or_die(commit);
 		cur_depth++;
-		if (shallows) {
-			for (size_t j = 0; j < shallows->nr; j++)
-				if (oideq(&commit->object.oid, &shallows->objects[j].item->oid))
-					if (!cur_depth_shallow || cur_depth < cur_depth_shallow)
-						cur_depth_shallow = cur_depth;
-
-			if ((is_repository_shallow(the_repository) && !commit->parents &&
-			     (graft = lookup_commit_graft(the_repository, &commit->object.oid)) != NULL &&
-			     graft->nr_parent < 0)) {
-				commit = NULL;
-				continue;
-			}
-		} else {
-			if ((depth != INFINITE_DEPTH && cur_depth >= depth) ||
-			    (is_repository_shallow(the_repository) && !commit->parents &&
-			     (graft = lookup_commit_graft(the_repository, &commit->object.oid)) != NULL &&
-			     graft->nr_parent < 0)) {
-				commit_list_insert(commit, &result);
-				commit->object.flags |= shallow_flag;
-				commit = NULL;
-				continue;
-			}
-			commit->object.flags |= not_shallow_flag;
+		if ((depth != INFINITE_DEPTH && cur_depth >= depth) ||
+		    (is_repository_shallow(the_repository) && !commit->parents &&
+		     (graft = lookup_commit_graft(the_repository, &commit->object.oid)) != NULL &&
+		     graft->nr_parent < 0)) {
+			commit_list_insert(commit, &result);
+			commit->object.flags |= shallow_flag;
+			commit = NULL;
+			continue;
 		}
+		commit->object.flags |= not_shallow_flag;
 		for (p = commit->parents, commit = NULL; p; p = p->next) {
 			int **depth_slot = commit_depth_at(&depths, p->item);
 			if (!*depth_slot) {
@@ -225,17 +204,85 @@ static struct commit_list *get_shallows_or_depth(struct object_array *heads,
 	deep_clear_commit_depth(&depths, free_depth_in_slab);
 	object_array_clear(&stack);
 
-	if (shallows && max_cur_depth)
-		*max_cur_depth = cur_depth_shallow;
 	return result;
 }
 
+/*
+ * Minimum 1-based depth of any client shallow reachable from `heads`.
+ * BFS so the first hit is the shortest path; unreachable shallows are
+ * ignored.  Returns 0 if none are reachable.
+ */
 int get_shallows_depth(struct object_array *heads, struct object_array *shallows)
 {
-	int max_cur_depth = 0;
-	get_shallows_or_depth(heads, shallows, &max_cur_depth, 0, 0, 0);
-	return max_cur_depth;
+	size_t i;
+	int result = 0;
+	struct commit_list *queue = NULL;
+	struct commit_list **tail = &queue;
+	struct oidset shallow_oids = OIDSET_INIT;
+	struct commit_depth depths;
 
+	if (!shallows || !shallows->nr)
+		return 0;
+
+	init_commit_depth(&depths);
+
+	for (i = 0; i < shallows->nr; i++)
+		oidset_insert(&shallow_oids, &shallows->objects[i].item->oid);
+
+	for (i = 0; i < heads->nr; i++) {
+		int **depth_slot;
+		struct commit *commit = (struct commit *)
+			deref_tag(the_repository,
+				  heads->objects[i].item, NULL, 0);
+
+		if (!commit || commit->object.type != OBJ_COMMIT)
+			continue;
+		depth_slot = commit_depth_at(&depths, commit);
+		if (*depth_slot)
+			continue;
+		*depth_slot = xmalloc(sizeof(int));
+		**depth_slot = 0;
+		tail = commit_list_append(commit, tail);
+	}
+
+	while (queue) {
+		struct commit_list *p;
+		struct commit_graft *graft;
+		struct commit *commit = pop_commit(&queue);
+		int cur_depth = **commit_depth_at(&depths, commit);
+
+		if (!queue)
+			tail = &queue;
+
+		parse_commit_or_die(commit);
+		cur_depth++;
+
+		if (oidset_contains(&shallow_oids, &commit->object.oid)) {
+			result = cur_depth;
+			break;
+		}
+
+		if (is_repository_shallow(the_repository) && !commit->parents &&
+		    (graft = lookup_commit_graft(the_repository,
+						 &commit->object.oid)) &&
+		    graft->nr_parent < 0)
+			continue;
+
+		for (p = commit->parents; p; p = p->next) {
+			int **depth_slot = commit_depth_at(&depths, p->item);
+
+			if (*depth_slot)
+				continue;
+			*depth_slot = xmalloc(sizeof(int));
+			**depth_slot = cur_depth;
+			tail = commit_list_append(p->item, tail);
+		}
+	}
+
+	commit_list_free(queue);
+	deep_clear_commit_depth(&depths, free_depth_in_slab);
+	oidset_clear(&shallow_oids);
+	return result;
 }
 
 struct commit_list *get_shallow_commits(struct object_array *heads,
@@ -249,8 +296,7 @@ struct commit_list *get_shallow_commits(struct object_array *heads,
 		else
 			return NULL;
 	}
-	return get_shallows_or_depth(heads, NULL, NULL,
-				     depth, shallow_flag, not_shallow_flag);
+	return get_shallows_or_depth(heads, depth, shallow_flag, not_shallow_flag);
 }
 
 static void show_commit(struct commit *commit, void *data)
