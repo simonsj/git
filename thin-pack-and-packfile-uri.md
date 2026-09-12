@@ -194,6 +194,65 @@ thickening the inline pack**, if you install a server-supplied idx.
 You should not treat that as a substitute for integrity checking unless
 you trust the CDN and the operator the way dumb HTTP already does.
 
+#### When does `verify-pack` / `index-pack --verify` usually run?
+
+Almost never as part of clone, fetch, or `packfile-uris`. They are
+on-demand checkers for an *existing* pack+idx pair, not the transfer
+path.
+
+`git verify-pack` is a thin wrapper: it execs `git index-pack --verify`
+(or `--verify-stat`) on each named pack (`builtin/verify-pack.c`).
+`index-pack --verify` requires a pack filename and an already-written
+`.idx`. It re-walks the pack, rebuilds the index in memory, and checks
+that it matches the file on disk (`WRITE_IDX_VERIFY` in
+`builtin/index-pack.c`). That is exactly the “prove this idx describes
+this pack” scan the previous paragraphs talked about.
+
+Nothing in `fetch-pack`, clone, or `http-fetch --packfile=` invokes
+that mode. The verification that *does* run on a normal fetch or clone
+is ordinary `index-pack` (no `--verify`): it *creates* the `.idx` while
+hashing every object. Same class of work, different command. For
+packs below `fetch.unpackLimit`, the client uses `unpack-objects`
+instead, which also reconstructs and hashes objects, just as loose
+objects rather than a pack+idx.
+
+The other automatic cousin is `git fsck` ( `--full` is the default).
+That calls the library `verify_pack()` in `pack-check.c` and walks
+every local pack. It is a maintenance/fsck pass, not something fetch
+runs. Admins and the test suite also call `git verify-pack` by hand
+after a repack or when hunting corruption.
+
+So if the client installs a server-supplied idx and skips `index-pack`,
+**no existing Git path will spontaneously re-verify that pair** unless
+someone later runs `git verify-pack`, `git index-pack --verify`, or
+`git fsck`.
+
+#### Can the usual `verify-pack` / `index-pack --verify` be disabled?
+
+There is nothing to disable on the fetch/clone client: those commands
+are not the usual path. No config key turns them on or off during
+transfer.
+
+What you can turn off, or already have off:
+
+- **`transfer.fsckObjects` / `fetch.fsckObjects`** default to false.
+  When true, fetch/clone pass `--fsck-objects` (or `--strict`) to
+  `index-pack`. That is extra semantic checking (malformed objects,
+  `.gitmodules`, and the rest of `fsck.<msg-id>`), not “does this idx
+  match this pack?” Leaving them unset already skips that extra pass.
+- **`git fsck --no-full`** or **`--connectivity-only`** skips or
+  narrows the pack-content walk if you are running fsck yourself.
+- There is no `fetch.verifyPack` (or similar) that means “after
+  download, run `index-pack --verify`.”
+
+You *cannot* disable the hash-every-object work of a normal
+`index-pack` that is *building* an idx. Creating the index *is* that
+scan. The only way to skip it is to not run `index-pack` at all —
+which is the server-supplied-idx scheme. In that scheme the client
+would opt in to a later `verify-pack` / `index-pack --verify` if it
+wants the binding proof back; that step would be optional and, today,
+manual.
+
 ### Clone versus fetch
 
 The lookup rule is the same in both cases: `odb_read_object()` can use
@@ -241,3 +300,5 @@ extra escape hatch when local state already covers the thin bases.
 | Must we *compute* an idx on the client? | No. A trustworthy idx from the server/CDN is enough to make the pack lookupable. |
 | Must we *have* an idx before `--fix-thin`? | Yes, for every URI-pack object that `--fix-thin` or connectivity will ask for. Git will not see a pack without one. |
 | Does clone vs fetch change that? | Clone has no local bases, so the URI pack+idx is on the critical path for both `--fix-thin` and connectivity. Fetch can thicken from existing objects and can skip the URI entirely when `C` is already had; it still needs an idx for any new URI pack it does install. |
+| When does `verify-pack` / `index-pack --verify` usually run? | It doesn’t, on clone/fetch/`packfile-uris`. Those commands re-check an existing pack+idx on demand (`verify-pack` just runs `index-pack --verify`). Fetch/clone instead run plain `index-pack` to *create* the idx. `git fsck` walks packs later via `verify_pack()`. |
+| Can the usual `verify-pack` / `index-pack --verify` be disabled on the client? | There is nothing to disable: fetch/clone never run them. `fetch.fsckObjects` is a separate, default-off semantic check. You cannot turn off the scan inside an `index-pack` that is building an idx; skipping that command (and installing a server idx) is what skips the scan. A later `verify-pack` would be optional and manual. |
