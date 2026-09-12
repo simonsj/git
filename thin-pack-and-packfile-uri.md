@@ -94,3 +94,150 @@ dynamic pack may be thin against the URI pack. That is only correct if
 the client has already downloaded and indexed the URI pack — which is
 what the protocol requires the client to be able to do before it relies
 on the inline pack.
+
+## Can the server send an index and skip client-side indexing?
+
+The previous section said the client must “download and index” the URI
+pack before it can thicken the inline pack. Those are two different
+jobs, and only one of them is strictly required for `--fix-thin`.
+
+### What `--fix-thin` actually needs
+
+`index-pack --fix-thin` does not scan the URI pack. For each unresolved
+`REF_DELTA` in the *inline* pack it calls `odb_read_object()` on the
+base OID (`builtin/index-pack.c`, `fix_unresolved_deltas()`). That is
+an ordinary object-database lookup:
+
+1. Find which local pack (or loose object) contains that OID.
+2. Read and inflate the bytes.
+3. Copy the reconstructed object into the inline pack so the thin pack
+   becomes self-contained.
+
+Step 1 is the constraint. Git’s object database discovers packs by
+their **`.idx` files**, then opens the matching `.pack`
+(`add_packed_git()` refuses a path that is not an `.idx`). A `.pack`
+sitting in `objects/pack/` with no index is invisible. There is no
+OID-to-offset map, so `odb_read_object()` cannot find a base that lives
+only in that pack.
+
+So “index the URI pack” here means **make the URI pack’s objects
+lookupable by OID**. Computing a fresh `.idx` on the client is one way
+to do that. It is not the only way.
+
+You cannot skip *having* an index. You can skip *generating* it, if
+someone hands you a usable one.
+
+### A server-supplied `.idx` is enough for lookup
+
+The URI pack is prebuilt. The operator who ran `pack-objects` already
+has (or can keep) the corresponding `pack-<hash>.idx` that
+`index-pack` would have written. That file is a deterministic
+OID-to-offset table plus CRC32s and a trailer that repeats the pack
+checksum (`Documentation/gitformat-pack.adoc`).
+
+A workable scheme:
+
+1. Host `base.pack` and `base.idx` (CDN, or a second URI).
+2. Advertise the pack hash as today (`<pack-hash> <uri>`).
+3. Client downloads both, checks that the pack trailer equals the
+   advertised hash and that the idx trailer names that same pack
+   checksum.
+4. Install them as `objects/pack/pack-<hash>.{pack,idx}` (plus a
+   `.keep` so `gc` does not delete them before refs move).
+5. Refresh the packed-git list.
+6. Run `index-pack --fix-thin` on the inline pack. Bases in `C` now
+   resolve through the installed idx.
+
+This is not hypothetical. Dumb HTTP already works that way:
+`git http-fetch` downloads published `pack-*.pack` **and** `pack-*.idx`
+and does not regenerate the index. The current `packfile-uris` client
+does the opposite: `http-fetch --packfile=` always pipes the download
+through `index-pack` and never fetches an idx.
+
+The idx is small relative to the pack (on the order of a few dozen
+bytes per object). Sending it from upload-pack itself, rather than the
+CDN, would still be cheap. Serving it next to the pack on the CDN
+needs either a naming convention (`<pack-uri>.idx`) or a protocol
+extension (today’s `packfile-uris` line is only `<hash> <uri>`).
+`Documentation/technical/packfile-uri.adoc` already lists “different
+file formats referenced by URIs” as something that would need a
+protocol change.
+
+Alternatives that avoid an idx are worse, not better: unpacking the URI
+pack into loose objects, or linearly scanning the pack on every lookup,
+are just more expensive ways of building the same map.
+
+### What you give up if you skip `index-pack`
+
+Lookup and verification are different.
+
+`index-pack` does not only write an `.idx`. It walks every object,
+resolves internal deltas, and checks that the inflated content hashes
+to the claimed OID. After that, Git treats the pack as trusted and does
+not re-hash on every later read.
+
+A downloaded idx can be self-consistent (its own checksum is valid, its
+trailer names the advertised pack) and still be a **lie about the
+pack**: the OID-to-offset table is not cryptographically bound to the
+bytes at those offsets. The only way to prove the idx describes that
+pack is to scan the pack — i.e. index it, or run `verify-pack` /
+`index-pack --verify`.
+
+`--fix-thin` does re-check `check_object_signature` for each **base it
+copies into the inline pack**. Those particular objects get verified.
+Everything else taken from the URI pack later (checkout, merge,
+connectivity) inherits the weaker “we trusted the publisher’s idx”
+model.
+
+So: **yes, you can skip client-side indexing for the purpose of
+thickening the inline pack**, if you install a server-supplied idx.
+You should not treat that as a substitute for integrity checking unless
+you trust the CDN and the operator the way dumb HTTP already does.
+
+### Clone versus fetch
+
+The lookup rule is the same in both cases: `odb_read_object()` can use
+a base only if that OID is already in the local ODB — loose, in some
+existing pack+idx, or in the newly installed URI pack+idx. Clone versus
+fetch changes **whether any of those bases are already local**, not
+whether a new URI pack can be used without an idx.
+
+**From-scratch clone (empty object store).**
+Nothing is local. Every thin-pack base that `--not C` omitted lives
+only in the URI pack. The client must have that pack *and some idx for
+it* (computed or downloaded) before `--fix-thin` can succeed. The same
+idx is required before the connectivity check, because objects in
+`reachable(T) ∩ reachable(C)` are not in the inline pack at all; they
+are the reason the URI pack was sent. Skipping client-side
+`index-pack` is most tempting here (the URI pack is large; indexing is
+CPU and I/O) and also the biggest integrity bet: this pack *is* the
+new repository’s history.
+
+**Fetch into an existing workspace.**
+Negotiation may already have marked real haves. `--fix-thin` searches
+the whole ODB, not “the URI pack only,” so any base the client already
+has does not need the URI pack. Two consequences:
+
+1. If the client already has `C` or a descendant, the design should
+   not send a URI at all. There is nothing to index.
+2. If the client lacks `C` but already has some of `C`’s closure
+   (related branches, earlier partial history), some inline-pack bases
+   resolve from existing packs. `--fix-thin` can succeed **without**
+   the URI pack if *every* unresolved `REF_DELTA` base happens to be
+   local. The URI pack is still required before the **connectivity**
+   check for omitted objects the client does not have.
+
+So on fetch you can sometimes thicken the inline pack first and only
+then install the URI pack. On clone you cannot. In neither case can
+you use a URI `.pack` with no `.idx`. A server-supplied idx substitutes
+for client-side indexing equally well in both; fetch merely offers an
+extra escape hatch when local state already covers the thin bases.
+
+### Short answers
+
+| Question | Answer |
+|---|---|
+| Must we *download* the URI pack before thickening the inline pack? | On clone, yes (those bytes are the missing bases). On fetch, only if some thin-pack base is not already local. |
+| Must we *compute* an idx on the client? | No. A trustworthy idx from the server/CDN is enough to make the pack lookupable. |
+| Must we *have* an idx before `--fix-thin`? | Yes, for every URI-pack object that `--fix-thin` or connectivity will ask for. Git will not see a pack without one. |
+| Does clone vs fetch change that? | Clone has no local bases, so the URI pack+idx is on the critical path for both `--fix-thin` and connectivity. Fetch can thicken from existing objects and can skip the URI entirely when `C` is already had; it still needs an idx for any new URI pack it does install. |
