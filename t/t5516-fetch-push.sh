@@ -428,6 +428,20 @@ test_expect_success 'push with ambiguity' '
 	check_push_result testrepo $the_first_commit heads/frotz tags/frotz
 '
 
+test_expect_success 'push with refs/ refspec falls through to refs/heads/refs/*' '
+	mk_test testrepo heads/refs/foo &&
+	git push testrepo :refs/foo &&
+	test_must_fail git -C testrepo show-ref --verify refs/heads/refs/foo
+'
+
+test_expect_success 'push with refs/ refspec and two strong matches' '
+	mk_test testrepo heads/refs/foo &&
+	git -C testrepo update-ref refs/foo $the_first_commit &&
+	test_must_fail git push testrepo :refs/foo 2>err &&
+	test_grep "dst refspec refs/foo matches more than one" err &&
+	check_push_result testrepo $the_first_commit foo heads/refs/foo
+'
+
 test_expect_success 'push with onelevel ref' '
 	mk_test testrepo heads/main &&
 	test_must_fail git push testrepo HEAD:refs/onelevel
