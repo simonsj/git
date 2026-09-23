@@ -21,6 +21,7 @@
 #include "dir.h"
 #include "setup.h"
 #include "string-list.h"
+#include "strmap.h"
 #include "strvec.h"
 #include "commit-reach.h"
 #include "advice.h"
@@ -1056,60 +1057,105 @@ void free_refs(struct ref *ref)
 	}
 }
 
+struct refspec_match {
+	struct ref *matched_weak;
+	struct ref *matched;
+	int weak_match;
+	int match;
+};
+
+static void add_refspec_match(struct refspec_match *m, const char *pattern,
+			      struct ref *ref)
+{
+	size_t patlen = strlen(pattern);
+	size_t namelen = strlen(ref->name);
+
+	/* A match is "weak" if it is with refs outside
+	 * heads or tags, and did not specify the pattern
+	 * in full (e.g. "refs/remotes/origin/master") or at
+	 * least from the toplevel (e.g. "remotes/origin/master");
+	 * otherwise "git push $URL master" would result in
+	 * ambiguity between remotes/origin/master and heads/master
+	 * at the remote site.
+	 */
+	if (namelen != patlen &&
+	    patlen != namelen - 5 &&
+	    !starts_with(ref->name, "refs/heads/") &&
+	    !starts_with(ref->name, "refs/tags/")) {
+		/* We want to catch the case where only weak
+		 * matches are found and there are multiple
+		 * matches, and where more than one strong
+		 * matches are found, as ambiguous.  One
+		 * strong match with zero or more weak matches
+		 * are acceptable as a unique match.
+		 */
+		m->matched_weak = ref;
+		m->weak_match++;
+	} else {
+		m->matched = ref;
+		m->match++;
+	}
+}
+
+static int finish_refspec_match(const struct refspec_match *m,
+				struct ref **matched_ref)
+{
+	if (!m->matched) {
+		if (matched_ref)
+			*matched_ref = m->matched_weak;
+		return m->weak_match;
+	}
+	if (matched_ref)
+		*matched_ref = m->matched;
+	return m->match;
+}
+
 int count_refspec_match(const char *pattern,
 			struct ref *refs,
 			struct ref **matched_ref)
 {
-	int patlen = strlen(pattern);
-	struct ref *matched_weak = NULL;
-	struct ref *matched = NULL;
-	int weak_match = 0;
-	int match = 0;
+	struct refspec_match m = { 0 };
 
-	for (weak_match = match = 0; refs; refs = refs->next) {
-		char *name = refs->name;
-		int namelen = strlen(name);
+	for (; refs; refs = refs->next)
+		if (refname_match(pattern, refs->name))
+			add_refspec_match(&m, pattern, refs);
+	return finish_refspec_match(&m, matched_ref);
+}
 
-		if (!refname_match(pattern, name))
-			continue;
+/*
+ * Map each ref's name to the ref, so that count_refspec_match_in_map()
+ * can look up the ref_rev_parse_rules expansions of a pattern instead
+ * of scanning the list. The keys point into the refs and stay valid as
+ * long as the refs do.
+ */
+static void ref_map_init(struct strmap *map, struct ref *refs)
+{
+	strmap_init_with_options(map, NULL, 0);
+	for (; refs; refs = refs->next)
+		strmap_put(map, refs->name, refs);
+}
 
-		/* A match is "weak" if it is with refs outside
-		 * heads or tags, and did not specify the pattern
-		 * in full (e.g. "refs/remotes/origin/master") or at
-		 * least from the toplevel (e.g. "remotes/origin/master");
-		 * otherwise "git push $URL master" would result in
-		 * ambiguity between remotes/origin/master and heads/master
-		 * at the remote site.
-		 */
-		if (namelen != patlen &&
-		    patlen != namelen - 5 &&
-		    !starts_with(name, "refs/heads/") &&
-		    !starts_with(name, "refs/tags/")) {
-			/* We want to catch the case where only weak
-			 * matches are found and there are multiple
-			 * matches, and where more than one strong
-			 * matches are found, as ambiguous.  One
-			 * strong match with zero or more weak matches
-			 * are acceptable as a unique match.
-			 */
-			matched_weak = refs;
-			weak_match++;
-		}
-		else {
-			matched = refs;
-			match++;
-		}
+/*
+ * Like count_refspec_match(), but over a map built by ref_map_init().
+ * Every ref_rev_parse_rules expansion of the pattern is a distinct
+ * string, so each matching ref is found exactly once.
+ */
+static int count_refspec_match_in_map(const char *pattern,
+				      struct strmap *refs,
+				      struct ref **matched_ref)
+{
+	struct refspec_match m = { 0 };
+	struct strvec names = STRVEC_INIT;
+	size_t i;
+
+	expand_ref_prefix(&names, pattern);
+	for (i = 0; i < names.nr; i++) {
+		struct ref *ref = strmap_get(refs, names.v[i]);
+		if (ref)
+			add_refspec_match(&m, pattern, ref);
 	}
-	if (!matched) {
-		if (matched_ref)
-			*matched_ref = matched_weak;
-		return weak_match;
-	}
-	else {
-		if (matched_ref)
-			*matched_ref = matched;
-		return match;
-	}
+	strvec_clear(&names);
+	return finish_refspec_match(&m, matched_ref);
 }
 
 void tail_link_ref(struct ref *ref, struct ref ***tail)
@@ -1178,12 +1224,12 @@ static char *guess_ref(const char *name, struct ref *peer)
 	return strbuf_detach(&buf, NULL);
 }
 
-static int match_explicit_lhs(struct ref *src,
+static int match_explicit_lhs(struct strmap *src,
 			      struct refspec_item *rs,
 			      struct ref **match,
 			      int *allocated_match)
 {
-	switch (count_refspec_match(rs->src, src, match)) {
+	switch (count_refspec_match_in_map(rs->src, src, match)) {
 	case 1:
 		if (allocated_match)
 			*allocated_match = 0;
@@ -1265,7 +1311,7 @@ static void show_push_unqualified_ref_name_error(const char *dst_value,
 	}
 }
 
-static int match_explicit(struct ref *src, struct ref *dst,
+static int match_explicit(struct strmap *src, struct strmap *dst,
 			  struct ref ***dst_tail,
 			  struct refspec_item *rs)
 {
@@ -1299,7 +1345,7 @@ static int match_explicit(struct ref *src, struct ref *dst,
 			    matched_src->name);
 	}
 
-	switch (count_refspec_match(dst_value, dst, &matched_dst)) {
+	switch (count_refspec_match_in_map(dst_value, dst, &matched_dst)) {
 	case 1:
 		break;
 	case 0:
@@ -1315,6 +1361,9 @@ static int match_explicit(struct ref *src, struct ref *dst,
 			show_push_unqualified_ref_name_error(dst_value,
 							     matched_src->name);
 		}
+		/* later refspecs must see the ref we just added to dst */
+		if (matched_dst)
+			strmap_put(dst, matched_dst->name, matched_dst);
 		break;
 	default:
 		matched_dst = NULL;
@@ -1351,9 +1400,16 @@ out:
 static int match_explicit_refs(struct ref *src, struct ref *dst,
 			       struct ref ***dst_tail, struct refspec *rs)
 {
+	struct strmap src_map, dst_map;
 	int i, errs;
+
+	ref_map_init(&src_map, src);
+	ref_map_init(&dst_map, dst);
 	for (i = errs = 0; i < rs->nr; i++)
-		errs += match_explicit(src, dst, dst_tail, &rs->items[i]);
+		errs += match_explicit(&src_map, &dst_map, dst_tail,
+				       &rs->items[i]);
+	strmap_clear(&src_map, 0);
+	strmap_clear(&dst_map, 0);
 	return errs;
 }
 
@@ -1564,17 +1620,20 @@ static void prepare_ref_index(struct string_list *ref_index, struct ref *ref)
  */
 int check_push_refs(struct ref *src, struct refspec *rs)
 {
+	struct strmap src_map;
 	int ret = 0;
 	int i;
 
+	ref_map_init(&src_map, src);
 	for (i = 0; i < rs->nr; i++) {
 		struct refspec_item *item = &rs->items[i];
 
 		if (item->pattern || item->matching || item->negative)
 			continue;
 
-		ret |= match_explicit_lhs(src, item, NULL, NULL);
+		ret |= match_explicit_lhs(&src_map, item, NULL, NULL);
 	}
+	strmap_clear(&src_map, 0);
 
 	return ret;
 }
