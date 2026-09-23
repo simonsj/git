@@ -12,7 +12,7 @@ but changes nothing, so every repetition measures the same work.
 
 test_perf_fresh_repo
 
-ref_count=10000
+ref_count=20000
 
 test_expect_success 'create server with many refs and clone it' '
 	test_commit base &&
@@ -22,7 +22,7 @@ test_expect_success 'create server with many refs and clone it' '
 	git clone server client
 '
 
-for nr_refspecs in 1 8 24
+for nr_refspecs in 1 256 1024 4096 16384
 do
 	test_expect_success "create $nr_refspecs refspecs" '
 		oid=$(git -C server rev-parse HEAD) &&
