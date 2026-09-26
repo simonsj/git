@@ -22,9 +22,9 @@ On a large thick clone bundle, today’s client:
 
 1. GETs the whole bundle (header + pack) into a tempfile.
 2. Parses the header, then feeds the pack bytes to
-   `git index-pack --stdin --fix-thin`.
+  `git index-pack --stdin --fix-thin`.
 3. That command *copies the pack again* and inflates/hashes every
-   object to *build* an idx the publisher already has.
+  object to *build* an idx the publisher already has.
 
 The end state is `objects/pack/pack-<hash>.{pack,idx}` plus
 `refs/bundles/*`. We already have the pack bytes after step 1. The
@@ -38,14 +38,16 @@ and keep calling `unbundle()`.
 ## Non-goals
 
 - Thin or incremental bundles (`--fix-thin` can rewrite the pack
-  hash; a publisher idx of the pre-fix pack is then the wrong file).
+hash; a publisher idx of the pre-fix pack is then the wrong file).
 - Changing the bundle *file* format. The idx is a sidecar, not a
-  new header field.
+new header field.
 - Replacing bundles with bare pack+idx (that drops tip refs). The
-  header still supplies `refs/bundles/*`.
+header still supplies `refs/bundles/*`.
 - Automatic `verify-pack` after install. Same as fetch today.
 - A `$GIT_DIR/hooks/` download hook. Clone has no useful local
-  hooks; see “Download helper” below.
+hooks; see “Download helper” below.
+
+
 
 ## Advertisement
 
@@ -65,10 +67,10 @@ the bundle file.
 Rules:
 
 - The key is optional per id. A list may mix thick+idx entries
-  with ordinary bundles.
+with ordinary bundles.
 - Relative URIs resolve like `bundle.<id>.uri`.
 - Advertise `idx` only for thick bundles. If the client still finds
-  prerequisites in the header, it ignores the idx and unbundles.
+prerequisites in the header, it ignores the idx and unbundles.
 - Old clients never look at the key.
 
 Optional sugar (not required for the MVP):
@@ -87,7 +89,7 @@ If the URI is a bundle, not a config list, and the client has the
 feature on:
 
 - if the URI ends in `.bundle`, try the same URL with that suffix
-  replaced by `.idx`;
+replaced by `.idx`;
 - otherwise try `<uri>.idx`.
 
 HTTP 404 → today’s `unbundle` (bundle-uri already degrades). Do
@@ -135,19 +137,19 @@ After the bundle bytes are on disk (and the idx has been
 downloaded, in parallel if the helper is in use):
 
 1. `read_bundle_header()` — fd now at the pack. If any
-   prerequisite → `unbundle()` and stop.
+  prerequisite → `unbundle()` and stop.
 2. `verify_pack_index()` on the downloaded idx. Idx
-   self-checksum valid.
+  self-checksum valid.
 3. Pack trailer (last `hashsz` bytes of the bundle file) equals
-   the pack checksum stored in the idx trailer, and equals
+  the pack checksum stored in the idx trailer, and equals
    `bundle.<id>.packHash` if that key was sent.
 4. Copy or splice the pack portion to
-   `objects/pack/pack-<hash>.pack`. One write, not the
+  `objects/pack/pack-<hash>.pack`. One write, not the
    stdin-into-`tmp_pack` second copy `index-pack --stdin` does.
 5. Install `pack-<hash>.idx`. Write a `.keep` until
-   `refs/bundles/*` are updated.
+  `refs/bundles/*` are updated.
 6. `refs_update_ref()` from the header, same as today
-   (`c858c6442b`: every `refs/*` in the header).
+  (`c858c6442b`: every `refs/*` in the header).
 7. Refresh packed-git. Unlink the bundle tempfile.
 
 Do **not** run `index-pack`. Do **not** pass `--fix-thin`.
@@ -225,65 +227,16 @@ not the second RTT.
 
 ## Fallback
 
-| Situation | Behavior |
-|---|---|
-| Old client | Ignores `bundle.<id>.idx`; `unbundle()` as today |
-| New client, no idx key / synthesis 404 | `unbundle()` |
-| `transfer.bundleURIIdx=false` | `unbundle()` |
-| Header has prerequisites | `unbundle()` (idx unused) |
-| `transfer.fsckObjects` | `unbundle()` + `--fsck-objects` |
-| Idx / pack trailer mismatch | Fail that bundle; do not install a half-pair; try the next list entry or fall back to fetch |
-| Idx HTTP 404 after an explicit list key | Fail that bundle (the list promised an idx). Synthesis 404 is the other row |
-| Helper missing / non-zero | Same as a failed `get`: that bundle is skipped |
 
-## Operator workflow
+| Situation                               | Behavior                                                                                    |
+| --------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Old client                              | Ignores `bundle.<id>.idx`; `unbundle()` as today                                            |
+| New client, no idx key / synthesis 404  | `unbundle()`                                                                                |
+| `transfer.bundleURIIdx=false`           | `unbundle()`                                                                                |
+| Header has prerequisites                | `unbundle()` (idx unused)                                                                   |
+| `transfer.fsckObjects`                  | `unbundle()` + `--fsck-objects`                                                             |
+| Idx / pack trailer mismatch             | Fail that bundle; do not install a half-pair; try the next list entry or fall back to fetch |
+| Idx HTTP 404 after an explicit list key | Fail that bundle (the list promised an idx). Synthesis 404 is the other row                 |
+| Helper missing / non-zero               | Same as a failed `get`: that bundle is skipped                                              |
 
-When cutting a thick clone bundle, keep the idx `pack-objects`
-already wrote:
 
-```bash
-git bundle create base.bundle --all          # thick: no --since / prereqs
-# objects/pack/pack-<hash>.{pack,idx} exist from that run
-# publish base.bundle and pack-<hash>.idx (as base.idx) on the CDN
-```
-
-List:
-
-```text
-[bundle]
-	version = 1
-	mode = all
-
-[bundle "full"]
-	uri = https://cdn.example/base.bundle
-	idx = https://cdn.example/base.idx
-```
-
-Do not advertise `idx` on creationToken incrementals unless
-those files are themselves thick (no `-` prerequisite lines).
-
-## Sequence of changes
-
-1. **Docs** — `bundle-uri.adoc`: `bundle.<id>.idx`, thick-only
-   rule, synthesis for `--bundle-uri`, trust/fsck note.
-   `gitprotocol-v2.adoc`: mention the new key under future →
-   implemented keys. `config/transfer.adoc`:
-   `transfer.bundleURIIdx`.
-2. **Parse** — accept `bundle.<id>.idx` (and optional
-   `packHash` / `size`) in the existing list parser.
-3. **`unbundle` split** — extract “header + install pack+idx +
-   write refs” from “header + `index-pack --stdin --fix-thin`.”
-   Fast path is a new flag or a sibling of `unbundle()`.
-4. **Wire it in `bundle-uri.c`** — after download, if the gate
-   in “When the fast path is allowed” holds, take (3); else
-   today’s call. Tests in `t/t5558` / `t/t5730`: thick+idx
-   clone (no `index-pack` for that hash), old-client ignore,
-   thin fallback, fsck fallback, trailer mismatch, synthesis
-   404.
-5. **`fetch.bundleUriHelper`** — optional, after (4) works with
-   sequential GETs. Shared record format with
-   `fetch.packfileUriHelper` if that lands.
-
-(1)–(4) are the feature. (5) is how the remaining GET becomes
-fast on a multi-gigabyte bundle. Neither changes the origin
-protocol beyond one ignored-by-old-clients list key.
