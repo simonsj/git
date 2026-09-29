@@ -361,6 +361,13 @@ test_expect_success 'push with matching heads on the command line' '
 	check_push_result testrepo $the_commit heads/main
 '
 
+test_expect_success 'push two explicit refspecs cannot create the same new dst' '
+	mk_test testrepo heads/main &&
+	test_must_fail git push testrepo \
+		main:refs/heads/new main:refs/heads/new 2>err &&
+	test_grep "dst ref refs/heads/new receives from more than one src" err
+'
+
 test_expect_success 'failed (non-fast-forward) push with matching heads' '
 	mk_test testrepo heads/main &&
 	git push testrepo : &&

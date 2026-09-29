@@ -1213,12 +1213,12 @@ static char *guess_ref(const char *name, struct ref *peer)
 	return strbuf_detach(&buf, NULL);
 }
 
-static int match_explicit_lhs_count(const int count,
-				    struct refspec_item *rs,
-				    struct ref **match,
-				    int *allocated_match)
+static int match_explicit_lhs(struct strmap *src,
+			      struct refspec_item *rs,
+			      struct ref **match,
+			      int *allocated_match)
 {
-	switch (count) {
+	switch (count_refspec_match_in_map(rs->src, src, match)) {
 	case 1:
 		if (allocated_match)
 			*allocated_match = 0;
@@ -1236,24 +1236,6 @@ static int match_explicit_lhs_count(const int count,
 	default:
 		return error(_("src refspec %s matches more than one"), rs->src);
 	}
-}
-
-static int match_explicit_lhs(struct ref *src,
-			      struct refspec_item *rs,
-			      struct ref **match,
-			      int *allocated_match)
-{
-	return match_explicit_lhs_count(count_refspec_match(rs->src, src, match),
-					rs, match, allocated_match);
-}
-
-static int match_explicit_lhs_map(struct strmap *src,
-				  struct refspec_item *rs,
-				  struct ref **match,
-				  int *allocated_match)
-{
-	return match_explicit_lhs_count(count_refspec_match_in_map(rs->src, src, match),
-					rs, match, allocated_match);
 }
 
 static void show_push_unqualified_ref_name_error(const char *dst_value,
@@ -1332,7 +1314,7 @@ static bool any_refspec_item_is_explicit(const struct refspec *rs)
 	return false;
 }
 
-static int match_explicit(struct ref *src, struct ref *dst,
+static int match_explicit(struct strmap *src, struct strmap *dst,
 			  struct ref ***dst_tail,
 			  struct refspec_item *rs)
 {
@@ -1366,7 +1348,7 @@ static int match_explicit(struct ref *src, struct ref *dst,
 			    matched_src->name);
 	}
 
-	switch (count_refspec_match(dst_value, dst, &matched_dst)) {
+	switch (count_refspec_match_in_map(dst_value, dst, &matched_dst)) {
 	case 1:
 		break;
 	case 0:
@@ -1382,6 +1364,9 @@ static int match_explicit(struct ref *src, struct ref *dst,
 			show_push_unqualified_ref_name_error(dst_value,
 							     matched_src->name);
 		}
+		/* later refspecs must see the ref we just added to dst */
+		if (matched_dst)
+			strmap_put(dst, matched_dst->name, matched_dst);
 		break;
 	default:
 		matched_dst = NULL;
@@ -1419,8 +1404,19 @@ static int match_explicit_refs(struct ref *src, struct ref *dst,
 			       struct ref ***dst_tail, struct refspec *rs)
 {
 	int i, errs;
+	struct strmap src_map, dst_map;
+
+	if (!any_refspec_item_is_explicit(rs))
+		return 0;
+
+	ref_map_init(&src_map, src);
+	ref_map_init(&dst_map, dst);
 	for (i = errs = 0; i < rs->nr; i++)
-		errs += match_explicit(src, dst, dst_tail, &rs->items[i]);
+		errs += match_explicit(&src_map, &dst_map, dst_tail,
+				       &rs->items[i]);
+	strmap_clear(&dst_map, 0);
+	strmap_clear(&src_map, 0);
+
 	return errs;
 }
 
@@ -1643,7 +1639,7 @@ int check_push_refs(struct ref *src, struct refspec *rs)
 		if (!refspec_item_is_explicit(item))
 			continue;
 
-		ret |= match_explicit_lhs_map(&src_map, item, NULL, NULL);
+		ret |= match_explicit_lhs(&src_map, item, NULL, NULL);
 	}
 	strmap_clear(&src_map, 0);
 
