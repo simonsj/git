@@ -1074,6 +1074,56 @@ test_expect_success 'LHS of refspec follows ref disambiguation rules' '
 	)
 '
 
+# branch.<name>.merge is stored verbatim, without the refname validation
+# that command-line and remote.<name>.fetch refspecs receive, so it is
+# the one way for a "./"-prefixed name to reach refname_match() on the
+# fetch side.  The two tests below cover the two places where that
+# happens in add_merge_config().
+test_expect_success 'fetch with "./"-prefixed branch.<name>.merge does not mark any ref for merge' '
+	mkdir dotslash-merge &&
+	(
+		cd dotslash-merge &&
+		git init -b main server &&
+		test_commit -C server one &&
+		git -C server branch other &&
+		test_commit -C server two &&
+
+		# The default refspec already fetches refs/heads/main, so
+		# the merge source is compared against the fetched refs
+		# via branch_merge_matches().
+		git clone server client &&
+		git -C client config branch.main.merge ./refs/heads/main &&
+		git -C client fetch &&
+		{
+			echo "$(git -C server rev-parse main)	not-for-merge" &&
+			echo "$(git -C server rev-parse other)	not-for-merge"
+		} >expect &&
+		cut -f -2 client/.git/FETCH_HEAD >actual &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'fetch with "./"-prefixed branch.<name>.merge does not match any remote ref' '
+	(
+		cd dotslash-merge &&
+
+		# Leave refs/heads/main out of the fetch refspec, so that
+		# the merge source is instead looked up among the refs the
+		# remote advertised, via find_ref_by_name_abbrev().  Under
+		# protocol v2 the merge source is also sent as a ref-prefix
+		# and a "./"-prefixed one narrows the advertisement to
+		# nothing, so use v0 where the full advertisement is seen.
+		git clone server client-v0 &&
+		git -C client-v0 config remote.origin.fetch \
+			+refs/heads/other:refs/remotes/origin/other &&
+		git -C client-v0 config branch.main.merge ./refs/heads/main &&
+		git -C client-v0 -c protocol.version=0 fetch &&
+		echo "$(git -C server rev-parse other)	not-for-merge" >expect &&
+		cut -f -2 client-v0/.git/FETCH_HEAD >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'fetch.writeCommitGraph' '
 	git clone three write &&
 	(

@@ -1,0 +1,46 @@
+t5510: test fetch with "./"-prefixed branch.<name>.merge
+
+refname_match() no longer expands ref_rev_parse_rules with mkpath(),
+so a "./"-prefixed abbreviation is no longer canonicalized by
+cleanup_path() behind the caller's back and now matches nothing.
+t5516 covers the push <src> side, where this was first noticed.  The
+same helper also serves the fetch side, where add_merge_config()
+reaches it in two ways:
+
+ - branch_merge_matches() compares each branch.<name>.merge value
+   against the refs the configured refspecs are about to fetch, to
+   mark the matching one for merge in FETCH_HEAD.
+
+ - When nothing in that map matches, get_fetch_map() looks the value
+   up among all refs the remote advertised, through get_remote_ref()
+   and find_ref_by_name_abbrev(), so that "git pull" can still honor
+   a branch.<name>.merge that lies outside the configured refspecs.
+
+Command-line refspecs and remote.<name>.fetch cannot carry a "./"
+prefix past parse_refspec(), which rejects them with "invalid refspec"
+via check_refname_format().  branch.<name>.merge is stored verbatim by
+add_merge(), so it is the one way such a name reaches refname_match()
+on the fetch side.  Add a test for each of the two call sites, with
+branch.main.merge set to "./refs/heads/main":
+
+ - With the default refspec, refs/heads/main is in the fetch map.
+   Before the change it was marked for merge as if the value had been
+   "refs/heads/main"; now it is not-for-merge like every other ref,
+   and "git pull" stops with "Your configuration specifies to merge
+   with the ref './refs/heads/main' from the remote, but no such ref
+   was fetched."
+
+ - With a refspec that leaves refs/heads/main out of the fetch map,
+   the lookup among the advertised refs used to find refs/heads/main
+   and fetch it for merge even though no refspec asked for it; now
+   nothing is fetched for it.  This test pins protocol.version=0 on
+   purpose: under v2, fetch also sends each branch.<name>.merge value
+   verbatim as a ref-prefix, and "./refs/heads/main" narrows the
+   advertisement so that refs/heads/main is never seen and the lookup
+   was a no-op both before and after.  v0 advertises everything, so it
+   is where the old behavior was observable.
+
+Both tests fail on the commit before the refname_match() change and
+pass with it.
+
+Signed-off-by: Jon Simons <jon@jonsimons.org>
