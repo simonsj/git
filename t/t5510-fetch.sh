@@ -1074,7 +1074,7 @@ test_expect_success 'LHS of refspec follows ref disambiguation rules' '
 	)
 '
 
-test_expect_failure 'fetch with "./"-prefixed branch.<name>.merge does not mark any ref for merge' '
+test_expect_success 'fetch with "./"-prefixed branch.<name>.merge does not mark any ref for merge' '
 	mkdir dotslash-merge-default-refspec &&
 	(
 		cd dotslash-merge-default-refspec &&
@@ -1120,7 +1120,7 @@ test_expect_success 'fetch protocol v2 with "./"-prefixed branch.<name>.merge ge
 	)
 '
 
-test_expect_failure 'fetch protocol v0 with "./"-prefixed branch.<name>.merge does not match any remote ref' '
+test_expect_success 'fetch protocol v0 with "./"-prefixed branch.<name>.merge does not match any remote ref' '
 	mkdir dotslash-merge-fetch-protocol-v0 &&
 	(
 		cd dotslash-merge-fetch-protocol-v0 &&
