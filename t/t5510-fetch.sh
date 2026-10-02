@@ -1074,6 +1074,74 @@ test_expect_success 'LHS of refspec follows ref disambiguation rules' '
 	)
 '
 
+test_expect_failure 'fetch with "./"-prefixed branch.<name>.merge does not mark any ref for merge' '
+	mkdir dotslash-merge-default-refspec &&
+	(
+		cd dotslash-merge-default-refspec &&
+		git init -b main server &&
+		test_commit -C server one &&
+		git -C server branch other &&
+		test_commit -C server two &&
+
+		# The bogus ./refs/heads/main should not match the remote refs/heads/main.
+		git clone server client &&
+		git -C client config branch.main.merge ./refs/heads/main &&
+		git -C client fetch &&
+		{
+			echo "$(git -C server rev-parse main)	not-for-merge" &&
+			echo "$(git -C server rev-parse other)	not-for-merge"
+		} >expect &&
+		cut -f -2 client/.git/FETCH_HEAD >actual &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'fetch protocol v2 with "./"-prefixed branch.<name>.merge gets no ref advertisement' '
+	mkdir dotslash-merge-fetch-protocol-v2 &&
+	(
+		cd dotslash-merge-fetch-protocol-v2 &&
+		git init -b main server &&
+		test_commit -C server one &&
+		git -C server branch other &&
+		test_commit -C server two &&
+
+		# Fetch with protocol v2 sending only the bogus "./refs/heads/main"
+		# ref-prefix: the server should advertise nothing because this is
+		# not the prefix of any ref.
+		git clone server client-v2 &&
+		git -C client-v2 config --unset-all remote.origin.fetch &&
+		git -C client-v2 config branch.main.merge ./refs/heads/main &&
+		GIT_TRACE_PACKET="$(pwd)/trace" \
+			git -C client-v2 -c protocol.version=2 fetch --no-tags &&
+		test_grep "fetch< version 2" trace &&
+		test_grep "fetch> ref-prefix \./refs/heads/main" trace &&
+		test_grep ! "fetch< $OID_REGEX " trace &&
+		test_must_be_empty client-v2/.git/FETCH_HEAD
+	)
+'
+
+test_expect_failure 'fetch protocol v0 with "./"-prefixed branch.<name>.merge does not match any remote ref' '
+	mkdir dotslash-merge-fetch-protocol-v0 &&
+	(
+		cd dotslash-merge-fetch-protocol-v0 &&
+		git init -b main server &&
+		test_commit -C server one &&
+		git -C server branch other &&
+		test_commit -C server two &&
+
+		# Omit refs/heads/main from the fetch refspec so that the merge
+		# source is instead looked up among the refs the remote advertised.
+		git clone server client-v0 &&
+		git -C client-v0 config remote.origin.fetch \
+			+refs/heads/other:refs/remotes/origin/other &&
+		git -C client-v0 config branch.main.merge ./refs/heads/main &&
+		git -C client-v0 -c protocol.version=0 fetch &&
+		echo "$(git -C server rev-parse other)	not-for-merge" >expect &&
+		cut -f -2 client-v0/.git/FETCH_HEAD >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'fetch.writeCommitGraph' '
 	git clone three write &&
 	(
