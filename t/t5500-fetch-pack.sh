@@ -984,6 +984,34 @@ test_expect_success 'fetching deepen beyond merged branch' '
 	)
 '
 
+test_expect_failure 'fetching deepen does not walk the entire history' '
+	git init shallow-deepen-bounded &&
+	(
+		cd shallow-deepen-bounded &&
+		# With a commit-graph, upload-pack could parse commits
+		# without reading them from the object store, which
+		# would defeat the missing-object tripwire below.
+		GIT_TEST_COMMIT_GRAPH=0 &&
+		export GIT_TEST_COMMIT_GRAPH &&
+		for i in one two three four five
+		do
+			git commit --allow-empty -m $i || exit 1
+		done &&
+		git clone --depth 1 "file://$(pwd)/." deepen &&
+
+		# Deepening from depth 1 to depth 2 needs only "five"
+		# and "four". Remove the root commit so that upload-pack
+		# dies if its walk gets that far.
+		root=$(git rev-list --max-parents=0 main) &&
+		rm .git/objects/$(test_oid_to_path $root) &&
+
+		git -C deepen fetch --deepen=1 &&
+		git -C deepen log --pretty=tformat:%s origin/main >actual &&
+		test_write_lines five four >expected &&
+		test_cmp expected actual
+	)
+'
+
 test_negotiation_algorithm_default () {
 	test_when_finished rm -rf clientv0 clientv2 &&
 	rm -rf server client &&
