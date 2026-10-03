@@ -2977,33 +2977,10 @@ static void check_if_includes_upstream(struct ref *remote)
 	free_one_ref(local);
 }
 
-static void apply_cas(struct push_cas_option *cas,
-		      struct remote *remote,
-		      struct ref *ref)
+static void apply_cas_tracking(struct push_cas_option *cas,
+			       struct remote *remote,
+			       struct ref *ref)
 {
-	int i;
-
-	/* Find an explicit --<option>=<name>[:<value>] entry */
-	for (i = 0; i < cas->nr; i++) {
-		struct push_cas *entry = &cas->entry[i];
-		if (!refname_match(entry->refname, ref->name))
-			continue;
-		ref->expect_old_sha1 = 1;
-		if (!entry->use_tracking)
-			oidcpy(&ref->old_oid_expect, &entry->expect);
-		else if (remote_tracking(remote, ref->name,
-					 &ref->old_oid_expect,
-					 &ref->tracking_ref))
-			oidclr(&ref->old_oid_expect, the_repository->hash_algo);
-		else
-			ref->check_reachable = cas->use_force_if_includes;
-		return;
-	}
-
-	/* Are we using "--<option>" to cover all? */
-	if (!cas->use_tracking_for_rest)
-		return;
-
 	ref->expect_old_sha1 = 1;
 	if (remote_tracking(remote, ref->name,
 			    &ref->old_oid_expect,
@@ -3013,22 +2990,61 @@ static void apply_cas(struct push_cas_option *cas,
 		ref->check_reachable = cas->use_force_if_includes;
 }
 
+static void apply_one_cas(struct strmap *ref_map,
+			  struct remote *remote,
+			  struct push_cas_option *cas,
+			  struct push_cas *entry)
+{
+	struct strvec names = STRVEC_INIT;
+	size_t i;
+
+	expand_ref_prefix(&names, entry->refname);
+	for (i = 0; i < names.nr; i++) {
+		struct ref *ref = strmap_get(ref_map, names.v[i]);
+		if (!ref || ref->expect_old_sha1)
+			continue;
+		if (entry->use_tracking) {
+			apply_cas_tracking(cas, remote, ref);
+		} else {
+			ref->expect_old_sha1 = 1;
+			oidcpy(&ref->old_oid_expect, &entry->expect);
+		}
+	}
+	strvec_clear(&names);
+}
+
 void apply_push_cas(struct push_cas_option *cas,
 		    struct remote *remote,
 		    struct ref *remote_refs)
 {
+	struct strmap ref_map;
 	struct ref *ref;
-	for (ref = remote_refs; ref; ref = ref->next) {
-		apply_cas(cas, remote, ref);
+	int i;
 
-		/*
-		 * If "compare-and-swap" is in "use_tracking[_for_rest]"
-		 * mode, and if "--force-if-includes" was specified, run
-		 * the check.
-		 */
+	if (cas->nr) {
+		ref_map_init(&ref_map, remote_refs);
+		for (i = 0; i < cas->nr; i++)
+			apply_one_cas(&ref_map, remote, cas, &cas->entry[i]);
+		strmap_clear(&ref_map, 0);
+	}
+
+	/* Are we using "--<option>" to cover all? */
+	if (cas->use_tracking_for_rest) {
+		for (ref = remote_refs; ref; ref = ref->next) {
+			if (ref->expect_old_sha1)
+				continue;
+			apply_cas_tracking(cas, remote, ref);
+		}
+	}
+
+	/*
+	 * If "compare-and-swap" is in "use_tracking[_for_rest]"
+	 * mode, and if "--force-if-includes" was specified, run
+	 * the check.
+	 */
+	for (ref = remote_refs; ref; ref = ref->next)
 		if (ref->check_reachable)
 			check_if_includes_upstream(ref);
-	}
 }
 
 struct remote_state *remote_state_new(void)

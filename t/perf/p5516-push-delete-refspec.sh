@@ -27,7 +27,6 @@ test_expect_success 'create server with many refs and two clients' '
 for mode in empty mirror
 do
 	client=client_$mode
-
 	for nr_refspecs in 1 10 100
 	do
 		test_expect_success "create $mode refspecs: $nr_refspecs" '
@@ -36,6 +35,23 @@ do
 
 		test_perf "$mode:refspecs:$nr_refspecs" '
 			git -C '"$client"' push --dry-run origin $(cat refspecs)
+		'
+	done
+done
+
+for mode in empty mirror
+do
+	client=client_$mode
+	for nr_refspecs in 1 10 100
+	do
+		oid=$(git -C server rev-parse HEAD)
+		test_expect_success "create $mode leases: $nr_refspecs" '
+			test_seq -f "refs/heads/b%d:$oid" $nr_refspecs |
+			sed "s/^/--force-with-lease=/" >leases
+		'
+
+		test_perf "$mode:lease:$nr_refspecs" '
+			git -C '"$client"' push --dry-run origin $(cat refspecs) $(cat leases)
 		'
 	done
 done
