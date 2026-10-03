@@ -400,6 +400,13 @@ test_expect_success 'push with no ambiguity (2)' '
 	check_push_result testrepo $the_commit remotes/origin/main
 '
 
+test_expect_success 'push with two refspecs targeting the same new dst fails' '
+	mk_test testrepo heads/main &&
+	test_must_fail git push testrepo \
+		main:refs/heads/new main:refs/heads/new 2>err &&
+	test_grep "dst ref refs/heads/new receives from more than one src" err
+'
+
 test_expect_success 'push with colon-less refspec, no ambiguity' '
 	mk_test testrepo heads/main heads/t/main &&
 	git branch -f t/main main &&
