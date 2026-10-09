@@ -412,25 +412,25 @@ test_expect_success 'push two refspecs targeting the same ref fails' '
 	test_grep "dst ref refs/heads/frotz receives from more than one src" err
 '
 
-test_expect_failure 'push --dry-run two refspecs creating the same ref fails on empty repo' '
+test_expect_success 'push --dry-run two refspecs creating the same ref fails on empty repo' '
 	mk_empty testrepo &&
 	test_must_fail git push --dry-run testrepo main:frotz main:frotz 2>err &&
 	test_grep "dst ref refs/heads/frotz receives from more than one src" err
 '
 
-test_expect_failure 'push two refspecs creating the same ref fails on empty repo' '
+test_expect_success 'push two refspecs creating the same ref fails on empty repo' '
 	mk_empty testrepo &&
 	test_must_fail git push testrepo main:frotz main:frotz 2>err &&
 	test_grep "dst ref refs/heads/frotz receives from more than one src" err
 '
 
-test_expect_failure 'push --dry-run abbreviated then full refspec creating the same ref fails on empty repo' '
+test_expect_success 'push --dry-run abbreviated then full refspec creating the same ref fails on empty repo' '
 	mk_empty testrepo &&
 	test_must_fail git push --dry-run testrepo main:frotz main:refs/heads/frotz 2>err &&
 	test_grep "dst ref refs/heads/frotz receives from more than one src" err
 '
 
-test_expect_failure 'push abbreviated then full refspec creating the same ref fails on empty repo' '
+test_expect_success 'push abbreviated then full refspec creating the same ref fails on empty repo' '
 	mk_empty testrepo &&
 	test_must_fail git push testrepo main:frotz main:refs/heads/frotz 2>err &&
 	test_grep "dst ref refs/heads/frotz receives from more than one src" err
