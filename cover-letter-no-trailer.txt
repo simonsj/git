@@ -1,0 +1,96 @@
+push: speed up client-side refspec matching
+
+This series speeds up client-side refspec matching in push, focused on
+pushing lots of branch deletes to a server that advertises lots of refs
+(100k in the benchmark below).
+
+Before this series, a 'git push --dry-run' of 100 delete refspecs to a
+server with 100k refs takes ~2.5s from an empty client and ~6.6s from a
+mirror; using one --force-with-lease per refspec takes ~4.8s and ~8.9s
+respectively.  After, the same pushes take ~0.15s to ~0.19s.
+
+refname_match() is updated to reuse the existing match_parse_rule(),
+and a few client-side linear ref traversals are converted to
+strmap lookups in remote.c.
+
+Guide to changes:
+
+ - Prep refname_match() call sites for behavioral change of mkpath()
+   removal, and introduce benchmark:
+
+   (1) remote: validate --force-with-lease <refname> argument
+   (2) t/perf: add explicit delete refspec matching test
+
+ - The first speedup, best viewed with `--color-moved`, is where
+   refname_match() changes behavior: mkpath() stripped a leading "./"
+   from the name being matched, so "./refs/heads/foo" used to match
+   "refs/heads/foo".  It no longer does.
+
+   This commit also covers the observable change: t5516 asserts that
+   pushing a "./"-prefixed source fails, and t5510 asserts that a
+   "./"-prefixed branch.<name>.merge is not matched on fetch.
+
+   (3) refs: stop using mkpath() in refname_match()
+
+ - The next speedup establishes the conversion pattern of using
+   expand_ref_prefix() with strmap lookups (the same pattern is used
+   in two more spots that follow):
+
+   (4) remote: use strmap for check_push_refs()
+
+ - Fix a long-standing buglet where pushing two refspecs with the same
+   destination to an empty remote is not rejected client-side, as it is
+   when the remote has any ref.
+
+   t5408 and t5410 now cover server-side duplicate rejection and
+   send-pack's handling of a ref reported twice, without relying
+   on the client missing the duplicates.
+
+   Fixing this separately keeps the behavior change out of the strmap
+   conversion that immediately follows, which would otherwise fix it
+   as a side-effect.
+
+   The fix commit also adds a t5516 test for pushing two refspecs that
+   create the same new branch, and updates t5408 to expect the
+   client-side error for duplicate destinations:
+
+   (5) t5408, t5410: test duplicate updates without relying on the client
+   (6) t5408: check refspec order with distinct destinations
+   (7) remote: reject duplicate destinations on an empty remote
+
+ - Convert match_explicit_refs():
+
+   (8) remote: use strmap for match_explicit_refs()
+
+ - Measure and convert --force-with-lease paths:
+
+   (9) t/perf: measure --force-with-lease in p5516
+   (10) remote: restructure apply_push_cas() loops
+   (11) remote: use strmap for apply_push_cas()
+
+Numbers:
+
+A new benchmark demonstrates each performance change.  These numbers
+were gathered running the final form of p5516 against the earlier
+trees on my machine:
+
+  BASELINE             origin/master
+  REFNAME_MATCH        (3)  refs: stop using mkpath() in refname_match()
+  MAP_CHECK_PUSH_REFS  (4)  remote: use strmap for check_push_refs()
+  MAP_EXPLICIT_REFS    (8)  remote: use strmap for match_explicit_refs()
+  MAP_APPLY_PUSH_CAS   (11) remote: use strmap for apply_push_cas()
+
+  Test                           BASELINE          REFNAME_MATCH            MAP_CHECK_PUSH_REFS      MAP_EXPLICIT_REFS        MAP_APPLY_PUSH_CAS
+  --------------------------------------------------------------------------------------------------------------------------------------------------
+  5516.3: empty:refspecs:1       0.16(0.09+0.11)   0.14(0.07+0.11) -12.5%   0.14(0.07+0.11) -12.5%   0.14(0.07+0.11) -12.5%   0.14(0.08+0.11) -12.5%
+  5516.5: empty:refspecs:10      0.37(0.30+0.11)   0.17(0.10+0.11) -54.1%   0.17(0.11+0.11) -54.1%   0.13(0.07+0.11) -64.9%   0.14(0.07+0.11) -62.2%
+  5516.7: empty:refspecs:100     2.48(2.41+0.11)   0.49(0.43+0.11) -80.2%   0.47(0.40+0.11) -81.0%   0.15(0.08+0.11) -94.0%   0.15(0.09+0.11) -94.0%
+  5516.9: mirror:refspecs:1      0.22(0.15+0.11)   0.16(0.09+0.11) -27.3%   0.16(0.09+0.11) -27.3%   0.16(0.09+0.11) -27.3%   0.17(0.10+0.11) -22.7%
+  5516.11: mirror:refspecs:10    0.81(0.74+0.11)   0.26(0.19+0.11) -67.9%   0.23(0.16+0.11) -71.6%   0.16(0.09+0.11) -80.2%   0.17(0.10+0.12) -79.0%
+  5516.13: mirror:refspecs:100   6.64(6.57+0.12)   1.21(1.13+0.12) -81.8%   0.86(0.79+0.12) -87.0%   0.18(0.11+0.11) -97.3%   0.18(0.11+0.11) -97.3%
+  5516.16: empty:lease:1         0.17(0.11+0.11)   0.14(0.07+0.11) -17.6%   0.14(0.07+0.11) -17.6%   0.14(0.07+0.11) -17.6%   0.15(0.08+0.11) -11.8%
+  5516.19: empty:lease:10        0.71(0.65+0.11)   0.20(0.14+0.11) -71.8%   0.20(0.13+0.11) -71.8%   0.17(0.10+0.11) -76.1%   0.15(0.08+0.11) -78.9%
+  5516.22: empty:lease:100       4.79(4.71+0.12)   0.78(0.71+0.12) -83.7%   0.80(0.73+0.12) -83.3%   0.45(0.38+0.11) -90.6%   0.16(0.09+0.11) -96.7%
+  5516.25: mirror:lease:1        0.24(0.17+0.11)   0.17(0.10+0.11) -29.2%   0.17(0.10+0.12) -29.2%   0.17(0.10+0.12) -29.2%   0.18(0.11+0.12) -25.0%
+  5516.28: mirror:lease:10       1.04(0.97+0.11)   0.29(0.22+0.11) -72.1%   0.26(0.19+0.12) -75.0%   0.20(0.13+0.11) -80.8%   0.18(0.11+0.12) -82.7%
+  5516.31: mirror:lease:100      8.93(8.85+0.12)   1.47(1.40+0.12) -83.5%   1.11(1.04+0.12) -87.6%   0.49(0.42+0.12) -94.5%   0.19(0.12+0.12) -97.9%
