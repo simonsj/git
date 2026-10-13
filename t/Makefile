@@ -176,7 +176,8 @@ test-lint-shell-syntax:
 	@'$(PERL_PATH_SQ)' check-non-portable-shell.pl $(T) $(THELPERS) $(TPERF)
 
 test-greplint:
-	@'$(PERL_PATH_SQ)' greplint.pl $(T) $(THELPERS) $(TPERF)
+	@printf '%s\n' $(T) $(THELPERS) $(TPERF) | \
+	'$(SHELL_PATH_SQ)' divvy.sh '$(PERL_PATH_SQ)' greplint.pl
 
 test-lint-filenames:
 	@# We do *not* pass a glob to ls-files but use grep instead, to catch
