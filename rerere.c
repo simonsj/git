@@ -956,7 +956,7 @@ int rerere_cache_setup(struct rerere_cache *cache,
  * perform mergy operations, possibly leaving conflicted index entries
  * and working tree files.
  */
-int repo_rerere(struct repository *r, int flags)
+int rerere_record(struct repository *r, int flags)
 {
 	struct string_list merge_rr = STRING_LIST_INIT_DUP;
 	struct rerere_cache cache;
