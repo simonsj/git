@@ -256,82 +256,116 @@ static struct pack_list * pack_list_difference(const struct pack_list *A,
 	return ret;
 }
 
+/*
+ * Object names in index order. v1/v2 store them in the index (v1 puts a
+ * 4-byte offset in front of each name). v3 stores full names in pack
+ * order, so copy them into name order.
+ */
+struct idx_names {
+	const unsigned char *base;
+	size_t step;
+	unsigned char *owned;
+};
+
+static void idx_names_init(struct idx_names *names, struct packed_git *p)
+{
+	const unsigned int hashsz = p->repo->hash_algo->rawsz;
+
+	names->owned = NULL;
+	if (p->index_version < 3) {
+		names->base = (const unsigned char *)p->index_data + 256 * 4;
+		if (p->index_version < 2) {
+			names->base += 4;
+			names->step = hashsz + 4;
+		} else {
+			names->base += 8;
+			names->step = hashsz;
+		}
+		return;
+	}
+
+	ALLOC_ARRAY(names->owned, st_mult(p->num_objects, hashsz));
+	for (uint32_t i = 0; i < p->num_objects; i++) {
+		struct object_id oid;
+
+		if (nth_packed_object_id(&oid, p, i) < 0)
+			die("unable to read object %"PRIu32" from %s",
+			    i, p->pack_name);
+		hashcpy(names->owned + st_mult(i, hashsz), oid.hash,
+			p->repo->hash_algo);
+	}
+	names->base = names->owned;
+	names->step = hashsz;
+}
+
 static void cmp_two_packs(struct pack_list *p1, struct pack_list *p2)
 {
-	size_t p1_off = 0, p2_off = 0, p1_step, p2_step;
-	const unsigned char *p1_base, *p2_base;
+	size_t p1_off = 0, p2_off = 0;
 	struct llist_item *p1_hint = NULL, *p2_hint = NULL;
-	const unsigned int hashsz = the_hash_algo->rawsz;
+	struct idx_names n1, n2;
 
 	if (!p1->unique_objects)
 		p1->unique_objects = llist_copy(p1->remaining_objects);
 	if (!p2->unique_objects)
 		p2->unique_objects = llist_copy(p2->remaining_objects);
 
-	p1_base = p1->pack->index_data;
-	p2_base = p2->pack->index_data;
-	p1_base += 256 * 4 + ((p1->pack->index_version < 2) ? 4 : 8);
-	p2_base += 256 * 4 + ((p2->pack->index_version < 2) ? 4 : 8);
-	p1_step = hashsz + ((p1->pack->index_version < 2) ? 4 : 0);
-	p2_step = hashsz + ((p2->pack->index_version < 2) ? 4 : 0);
+	idx_names_init(&n1, p1->pack);
+	idx_names_init(&n2, p2->pack);
 
-	while (p1_off < p1->pack->num_objects * p1_step &&
-	       p2_off < p2->pack->num_objects * p2_step)
+	while (p1_off < p1->pack->num_objects * n1.step &&
+	       p2_off < p2->pack->num_objects * n2.step)
 	{
-		const int cmp = hashcmp(p1_base + p1_off, p2_base + p2_off,
+		const int cmp = hashcmp(n1.base + p1_off, n2.base + p2_off,
 					the_repository->hash_algo);
 		/* cmp ~ p1 - p2 */
 		if (cmp == 0) {
 			p1_hint = llist_sorted_remove(p1->unique_objects,
-					p1_base + p1_off,
+					n1.base + p1_off,
 					p1_hint);
 			p2_hint = llist_sorted_remove(p2->unique_objects,
-					p1_base + p1_off,
+					n1.base + p1_off,
 					p2_hint);
-			p1_off += p1_step;
-			p2_off += p2_step;
+			p1_off += n1.step;
+			p2_off += n2.step;
 			continue;
 		}
-		if (cmp < 0) { /* p1 has the object, p2 doesn't */
-			p1_off += p1_step;
-		} else { /* p2 has the object, p1 doesn't */
-			p2_off += p2_step;
-		}
+		if (cmp < 0) /* p1 has the object, p2 doesn't */
+			p1_off += n1.step;
+		else /* p2 has the object, p1 doesn't */
+			p2_off += n2.step;
 	}
+	free(n1.owned);
+	free(n2.owned);
 }
 
 static size_t sizeof_union(struct packed_git *p1, struct packed_git *p2)
 {
 	size_t ret = 0;
-	size_t p1_off = 0, p2_off = 0, p1_step, p2_step;
-	const unsigned char *p1_base, *p2_base;
-	const unsigned int hashsz = the_hash_algo->rawsz;
+	size_t p1_off = 0, p2_off = 0;
+	struct idx_names n1, n2;
 
-	p1_base = p1->index_data;
-	p2_base = p2->index_data;
-	p1_base += 256 * 4 + ((p1->index_version < 2) ? 4 : 8);
-	p2_base += 256 * 4 + ((p2->index_version < 2) ? 4 : 8);
-	p1_step = hashsz + ((p1->index_version < 2) ? 4 : 0);
-	p2_step = hashsz + ((p2->index_version < 2) ? 4 : 0);
+	idx_names_init(&n1, p1);
+	idx_names_init(&n2, p2);
 
-	while (p1_off < p1->num_objects * p1_step &&
-	       p2_off < p2->num_objects * p2_step)
+	while (p1_off < p1->num_objects * n1.step &&
+	       p2_off < p2->num_objects * n2.step)
 	{
-		int cmp = hashcmp(p1_base + p1_off, p2_base + p2_off,
+		int cmp = hashcmp(n1.base + p1_off, n2.base + p2_off,
 				  the_repository->hash_algo);
 		/* cmp ~ p1 - p2 */
 		if (cmp == 0) {
 			ret++;
-			p1_off += p1_step;
-			p2_off += p2_step;
+			p1_off += n1.step;
+			p2_off += n2.step;
 			continue;
 		}
-		if (cmp < 0) { /* p1 has the object, p2 doesn't */
-			p1_off += p1_step;
-		} else { /* p2 has the object, p1 doesn't */
-			p2_off += p2_step;
-		}
+		if (cmp < 0) /* p1 has the object, p2 doesn't */
+			p1_off += n1.step;
+		else /* p2 has the object, p1 doesn't */
+			p2_off += n2.step;
 	}
+	free(n1.owned);
+	free(n2.owned);
 	return ret;
 }
 
@@ -537,8 +571,8 @@ static void scan_alt_odb_packs(void)
 static struct pack_list * add_pack(struct packed_git *p)
 {
 	struct pack_list l;
-	size_t off = 0, step;
-	const unsigned char *base;
+	struct idx_names names;
+	size_t off = 0;
 
 	if (!p->pack_local && !(alt_odb || verbose))
 		return NULL;
@@ -551,13 +585,13 @@ static struct pack_list * add_pack(struct packed_git *p)
 		return NULL;
 	}
 
-	base = p->index_data;
-	base += 256 * 4 + ((p->index_version < 2) ? 4 : 8);
-	step = the_hash_algo->rawsz + ((p->index_version < 2) ? 4 : 0);
-	while (off < p->num_objects * step) {
-		llist_insert_back(l.remaining_objects, base + off);
-		off += step;
+	idx_names_init(&names, p);
+	while (off < p->num_objects * names.step) {
+		llist_insert_back(l.remaining_objects, names.base + off);
+		off += names.step;
 	}
+	free(names.owned);
+
 	l.all_objects_size = l.remaining_objects->size;
 	l.unique_objects = NULL;
 	if (p->pack_local)

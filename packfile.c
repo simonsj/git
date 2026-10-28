@@ -281,6 +281,30 @@ int open_pack_index(struct packed_git *p)
 	return ret;
 }
 
+/*
+ * v3 indexes have no fanout table. Short names are sorted and start
+ * with the object's first hash byte, so fanout[value] is the index of
+ * the first short name whose first byte is greater than value.
+ */
+static uint32_t pack_v3_fanout(const struct packed_git *p, uint32_t value)
+{
+	const unsigned char *index = p->index_data;
+	unsigned int algo = hash_algo_by_ptr(p->repo->hash_algo);
+	const struct packed_git_format *pfp = &p->formats[algo - 1];
+	const unsigned char *names = index + pfp->data_offset;
+	uint32_t lo = 0, hi = p->num_objects;
+
+	while (lo < hi) {
+		uint32_t mi = lo + (hi - lo) / 2;
+
+		if (names[st_mult(mi, pfp->short_name_len)] <= value)
+			lo = mi + 1;
+		else
+			hi = mi;
+	}
+	return lo;
+}
+
 uint32_t get_pack_fanout(struct packed_git *p, uint32_t value)
 {
 	const uint32_t *level1_ofs = p->index_data;
@@ -291,9 +315,11 @@ uint32_t get_pack_fanout(struct packed_git *p, uint32_t value)
 		level1_ofs = p->index_data;
 	}
 
-	if (p->index_version > 1) {
+	if (p->index_version == 3)
+		return pack_v3_fanout(p, value);
+
+	if (p->index_version > 1)
 		level1_ofs += 2;
-	}
 
 	return ntohl(level1_ofs[value]);
 }
